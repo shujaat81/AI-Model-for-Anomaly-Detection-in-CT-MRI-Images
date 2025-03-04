@@ -2,7 +2,7 @@ import os
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc, precision_recall_curve
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, roc_auc_score, average_precision_score
 import sys
 from pathlib import Path
 import joblib
@@ -11,7 +11,7 @@ import joblib
 sys.path.append(str(Path(__file__).parent))
 from config import *
 from data.data_loader import load_dataset, load_test_data
-from models.autoencoder import compute_reconstruction_error, detect_anomalies
+from models.autoencoder import compute_reconstruction_error, detect_anomalies, compute_reconstruction_error_in_batches
 from models.feature_extractor import build_resnet_feature_extractor, extract_features
 from models.one_class_svm import OneClassSVMDetector
 from utils.visualization import plot_reconstructions, plot_anomaly_scores, plot_roc_curve, visualize_anomalies
@@ -107,65 +107,94 @@ def evaluate_autoencoder(autoencoder, normal_data, anomaly_data=None):
     
     return None
 
-def evaluate_one_class_svm(ocsvm, feature_extractor, normal_data, anomaly_data=None):
-    """Evaluate One-Class SVM-based anomaly detection."""
+def extract_features_for_evaluation(feature_extractor, images, batch_size=16):
+    """Extract features from images in batches for evaluation."""
+    total_samples = len(images)
+    num_batches = (total_samples + batch_size - 1) // batch_size
+    
+    all_features = []
+    print(f"Extracting features from {total_samples} images in {num_batches} batches...")
+    
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, total_samples)
+        
+        batch_images = images[start_idx:end_idx]
+        batch_features = extract_features(feature_extractor, batch_images)
+        
+        # Apply the same dimensionality reduction as in training
+        if len(batch_features.shape) > 2:
+            # If features are 4D (batch_size, height, width, channels)
+            # Take mean across spatial dimensions to reduce size
+            batch_features = np.mean(batch_features, axis=(1, 2))
+        
+        # Ensure features are 2D (batch_size, features)
+        batch_features = batch_features.reshape(batch_features.shape[0], -1)
+        
+        all_features.append(batch_features)
+        
+        # Print progress
+        if (i+1) % 10 == 0 or (i+1) == num_batches:
+            print(f"Processed {i+1}/{num_batches} batches", end="\r")
+    
+    # Combine all batches
+    features = np.vstack(all_features)
+    print(f"\nExtracted features shape: {features.shape}")
+    
+    return features
+
+def evaluate_one_class_svm(ocsvm, feature_extractor, normal_data, anomaly_data):
+    """Evaluate One-Class SVM anomaly detection."""
     print("Evaluating One-Class SVM-based anomaly detection...")
     
-    # Extract features from normal data
-    normal_features = extract_features(feature_extractor, normal_data)
+    # Extract features from normal and anomaly data
+    normal_features = extract_features_for_evaluation(feature_extractor, normal_data)
+    anomaly_features = extract_features_for_evaluation(feature_extractor, anomaly_data)
     
-    # Get predictions and decision scores for normal data
+    # Get predictions and scores
     normal_preds, normal_scores = ocsvm.predict(normal_features)
+    anomaly_preds, anomaly_scores = ocsvm.predict(anomaly_features)
     
-    # If anomaly data is provided, evaluate performance
-    if anomaly_data is not None:
-        # Extract features from anomaly data
-        anomaly_features = extract_features(feature_extractor, anomaly_data)
-        
-        # Get predictions and decision scores for anomaly data
-        anomaly_preds, anomaly_scores = ocsvm.predict(anomaly_features)
-        
-        # Plot anomaly score distribution
-        # Note: For One-Class SVM, lower scores indicate anomalies, so we negate them
-        plot_anomaly_scores(
-            -normal_scores, 
-            -anomaly_scores,
-            save_path=RESULTS_DIR / "ocsvm_anomaly_scores.png"
-        )
-        
-        # Create labels (0 for normal, 1 for anomaly)
-        y_true = np.concatenate([np.zeros(len(normal_scores)), np.ones(len(anomaly_scores))])
-        
-        # For metrics, we negate the scores because higher values should indicate anomalies
-        y_scores = np.concatenate([-normal_scores, -anomaly_scores])
-        
-        # Calculate metrics
-        metrics = calculate_anomaly_metrics(y_true, y_scores)
-        
-        # Plot ROC curve
-        roc_auc = plot_roc_curve(
-            y_true, 
-            y_scores, 
-            save_path=RESULTS_DIR / "ocsvm_roc_curve.png"
-        )
-        
-        print(f"One-Class SVM ROC AUC: {roc_auc:.4f}")
-        print(f"One-Class SVM PR AUC: {metrics['pr_auc']:.4f}")
-        print(f"Best F1 Score: {metrics['best_f1']:.4f} at threshold {metrics['best_threshold']:.6f}")
-        
-        # Visualize some anomalies
-        all_images = np.concatenate([normal_data, anomaly_data])
-        visualize_anomalies(
-            all_images, 
-            y_scores, 
-            threshold=metrics['best_threshold'],
-            n=10,
-            save_path=RESULTS_DIR / "ocsvm_detected_anomalies.png"
-        )
-        
-        return metrics
+    # Create labels (1 for normal, -1 for anomaly)
+    y_true = np.concatenate([np.ones(len(normal_data)), -np.ones(len(anomaly_data))])
+    y_scores = np.concatenate([normal_scores, anomaly_scores])
     
-    return None
+    # Calculate metrics
+    roc_auc = roc_auc_score(y_true > 0, y_scores)
+    pr_auc = average_precision_score(y_true > 0, y_scores)
+    
+    # Find best F1 score
+    precision, recall, thresholds = precision_recall_curve(y_true > 0, y_scores)
+    f1_scores = 2 * precision * recall / (precision + recall + 1e-10)
+    best_f1_idx = np.argmax(f1_scores)
+    best_f1 = f1_scores[best_f1_idx]
+    best_threshold = thresholds[best_f1_idx] if best_f1_idx < len(thresholds) else 0
+    
+    # Print results
+    print(f"One-Class SVM ROC AUC: {roc_auc:.4f}")
+    print(f"One-Class SVM PR AUC: {pr_auc:.4f}")
+    print(f"Best F1 Score: {best_f1:.4f} at threshold {best_threshold:.6f}")
+    
+    # Plot ROC curve
+    fpr, tpr, _ = roc_curve(y_true > 0, y_scores)
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f'ROC curve (area = {roc_auc:.4f})')
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('One-Class SVM ROC Curve')
+    plt.legend(loc="lower right")
+    plt.savefig(RESULTS_DIR / "ocsvm_roc_curve.png")
+    plt.close()
+    
+    return {
+        'roc_auc': roc_auc,
+        'pr_auc': pr_auc,
+        'best_f1': best_f1,
+        'best_threshold': best_threshold
+    }
 
 def compare_methods(autoencoder_metrics, ocsvm_metrics):
     """Compare different anomaly detection methods."""
@@ -224,61 +253,101 @@ def main():
     """Main evaluation function."""
     print("Starting evaluation process...")
     
-    # Load models
+    # Load trained models
     autoencoder, encoder, ocsvm = load_models()
     
     # Load test data
     test_data = load_test_data()
     
     # For evaluation, we'll use CT images as normal and MRI images as anomalies
-    normal_data = test_data['test_ct']
-    anomaly_data = test_data['test_mri']
+    # Use the correct keys from the test_data dictionary
+    if 'test_ct' in test_data and 'test_mri' in test_data:
+        normal_data = test_data['test_ct']
+        anomaly_data = test_data['test_mri']
+    else:
+        # Try alternative keys if available
+        available_keys = list(test_data.keys())
+        print(f"Available keys in test_data: {available_keys}")
+        
+        if len(available_keys) >= 2:
+            normal_data = test_data[available_keys[0]]
+            anomaly_data = test_data[available_keys[1]]
+        else:
+            raise ValueError("Could not find appropriate test data for evaluation")
     
     print(f"Loaded {len(normal_data)} normal images and {len(anomaly_data)} anomaly images for evaluation.")
     
-    # Initialize metrics
-    autoencoder_metrics = None
-    ocsvm_metrics = None
-    
-    # Evaluate autoencoder if available
+    # Evaluate autoencoder
     if autoencoder is not None:
         autoencoder_metrics = evaluate_autoencoder(autoencoder, normal_data, anomaly_data)
+    else:
+        autoencoder_metrics = None
+        print("Skipping autoencoder evaluation.")
     
-    # Evaluate One-Class SVM if available
+    # Build feature extractor for One-Class SVM
+    feature_extractor = None
     if ocsvm is not None:
-        # Build feature extractor
         feature_extractor = build_resnet_feature_extractor(
             input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3)
         )
+        
+        # Evaluate One-Class SVM
         ocsvm_metrics = evaluate_one_class_svm(ocsvm, feature_extractor, normal_data, anomaly_data)
+    else:
+        ocsvm_metrics = None
+        print("Skipping One-Class SVM evaluation.")
     
-    # Compare methods if both are available
+    # Compare methods if both were evaluated
     if autoencoder_metrics is not None and ocsvm_metrics is not None:
         compare_methods(autoencoder_metrics, ocsvm_metrics)
     
-    # If unseen demo images are available, evaluate on them
-    if test_data['unseen'] is not None:
-        print("\nEvaluating on unseen demo images...")
-        unseen_images = test_data['unseen']
-        
-        if autoencoder is not None:
-            # Detect anomalies using autoencoder
-            unseen_scores, is_anomaly, threshold = detect_anomalies(
-                autoencoder, 
-                unseen_images, 
-                reference_errors=compute_reconstruction_error(autoencoder, normal_data)
-            )
+    # Optional: Evaluate on some unseen demo images
+    try:
+        print("Evaluating on unseen demo images...")
+        # Check if demo directory exists
+        demo_dir = DATA_DIR / "demo"
+        if os.path.exists(demo_dir):
+            # Load a few demo images
+            demo_images = []
+            for img_path in os.listdir(demo_dir)[:10]:  # Limit to 10 images
+                if img_path.endswith(('.jpg', '.png', '.jpeg')):
+                    img = tf.keras.preprocessing.image.load_img(
+                        os.path.join(demo_dir, img_path),
+                        target_size=IMAGE_SIZE
+                    )
+                    img_array = tf.keras.preprocessing.image.img_to_array(img) / 255.0
+                    demo_images.append(img_array)
             
-            # Visualize results
-            visualize_anomalies(
-                unseen_images, 
-                unseen_scores, 
-                threshold=threshold,
-                n=min(10, len(unseen_images)),
-                save_path=RESULTS_DIR / "autoencoder_unseen_anomalies.png"
-            )
+            if demo_images:
+                demo_images = np.array(demo_images)
+                
+                # Detect anomalies using autoencoder
+                if autoencoder is not None and autoencoder_metrics is not None:
+                    # Use batch processing to avoid the progress bar issue
+                    unseen_scores = compute_reconstruction_error_in_batches(autoencoder, demo_images)
+                    is_anomaly = unseen_scores > autoencoder_metrics['best_threshold']
+                    
+                    # Visualize results
+                    plt.figure(figsize=(15, 10))
+                    for i in range(min(len(demo_images), 10)):
+                        plt.subplot(2, 5, i+1)
+                        plt.imshow(demo_images[i])
+                        status = "Anomaly" if is_anomaly[i] else "Normal"
+                        plt.title(f"{status} (Score: {unseen_scores[i]:.4f})")
+                        plt.axis('off')
+                    plt.tight_layout()
+                    plt.savefig(RESULTS_DIR / "demo_predictions.png")
+                    plt.close()
+                    
+                    print(f"Evaluated {len(demo_images)} demo images. Results saved to {RESULTS_DIR / 'demo_predictions.png'}")
+            else:
+                print("No demo images found.")
+        else:
+            print("Demo directory not found.")
+    except Exception as e:
+        print(f"Error evaluating demo images: {str(e)}")
     
-    print("Evaluation completed successfully!")
+    print("Evaluation completed!")
 
 if __name__ == "__main__":
     main() 

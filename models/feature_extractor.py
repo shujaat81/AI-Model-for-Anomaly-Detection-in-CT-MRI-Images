@@ -3,6 +3,7 @@ from tensorflow.keras.applications import ResNet50, VGG16
 from tensorflow.keras.models import Model
 import sys
 from pathlib import Path
+import numpy as np
 
 # Add parent directory to path to import config
 sys.path.append(str(Path(__file__).parent.parent))
@@ -38,15 +39,19 @@ def build_vgg_feature_extractor(input_shape=(128, 128, 3)):
 
 def extract_features(feature_extractor, images):
     """Extract features from images using the feature extractor."""
-    # Preprocess images for the specific model
-    if isinstance(feature_extractor.layers[0], tf.keras.applications.resnet.ResNet50):
+    # Check the model type by name instead of using isinstance
+    model_name = feature_extractor.name
+    
+    # Preprocess images based on model type
+    if 'resnet' in model_name.lower():
         preprocessed_images = tf.keras.applications.resnet50.preprocess_input(images * 255.0)
-    elif isinstance(feature_extractor.layers[0], tf.keras.applications.vgg16.VGG16):
+    elif 'vgg' in model_name.lower():
         preprocessed_images = tf.keras.applications.vgg16.preprocess_input(images * 255.0)
     else:
+        # Default preprocessing
         preprocessed_images = images
     
     # Extract features
-    features = feature_extractor.predict(preprocessed_images)
+    features = feature_extractor.predict(preprocessed_images, verbose=0)
     
     return features 

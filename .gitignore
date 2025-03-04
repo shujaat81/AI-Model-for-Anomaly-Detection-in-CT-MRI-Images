@@ -169,3 +169,40 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Dataset folder
+dataset/
+
+# Model checkpoints and saved models
+saved_models/
+
+# Results and visualizations
+results/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db

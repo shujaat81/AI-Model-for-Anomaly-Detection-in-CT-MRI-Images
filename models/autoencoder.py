@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
     Input, Conv2D, MaxPooling2D, UpSampling2D, 
@@ -73,6 +74,29 @@ def compute_reconstruction_error(autoencoder, images):
     reconstructions = autoencoder.predict(images)
     mse = np.mean(np.square(images - reconstructions), axis=(1, 2, 3))
     return mse
+
+def compute_reconstruction_error_in_batches(autoencoder, images, batch_size=16):
+    """Compute reconstruction error for anomaly detection in batches to save memory."""
+    total_samples = len(images)
+    num_batches = (total_samples + batch_size - 1) // batch_size  # Ceiling division
+    
+    all_errors = []
+    
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, total_samples)
+        
+        batch_images = images[start_idx:end_idx]
+        batch_reconstructions = autoencoder.predict(batch_images, verbose=0)
+        batch_mse = np.mean(np.square(batch_images - batch_reconstructions), axis=(1, 2, 3))
+        
+        all_errors.extend(batch_mse)
+        
+        # Print progress
+        print(f"Processed batch {i+1}/{num_batches}", end="\r")
+    
+    print("\nReconstruction error calculation complete.")
+    return np.array(all_errors)
 
 def detect_anomalies(autoencoder, images, threshold=None, reference_errors=None):
     """
