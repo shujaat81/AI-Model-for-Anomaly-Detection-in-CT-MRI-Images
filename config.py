@@ -23,4 +23,4 @@ LEARNING_RATE = 1e-4
 EPOCHS = 2
 
 # Anomaly detection parameters
-ANOMALY_THRESHOLD = 0.5  # This will be tuned based on validation data 
+ANOMALY_THRESHOLD = 0.5  # This will be tuned based on validation data
